@@ -103,6 +103,30 @@ def get_feed(
     return {"tweets": tweets, "source": source, "cached": False}
 
 
+@app.get("/trapwatch")
+def get_trapwatch(force: bool = Query(False)):
+    """
+    Returns live trap board data from TrapWatch.
+    Cached for 10 minutes.
+    """
+    trap_cache = TTLCache(maxsize=1, ttl=600)
+    cache_key = "trapwatch"
+    if not force and cache_key in trap_cache:
+        return {"traps": trap_cache[cache_key], "cached": True}
+
+    from scrapers.trapwatch import scrape_trapwatch, get_mock_traps
+    data = scrape_trapwatch()
+
+    if not data or all(len(v) == 0 for v in data.values() if isinstance(v, list)):
+        data = get_mock_traps()
+        source = "mock_fallback"
+    else:
+        source = "scrapling"
+
+    trap_cache[cache_key] = data
+    return {"traps": data, "source": source, "cached": False}
+
+
 @app.get("/odds")
 def get_odds(
     sports: Optional[str] = Query("nfl,nba,mlb", description="Comma-separated sports"),
