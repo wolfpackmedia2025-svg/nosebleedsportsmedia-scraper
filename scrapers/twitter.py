@@ -36,65 +36,37 @@ def format_count(n: int) -> str:
 
 
 import urllib.request
-import urllib.parse
-
-# X's public bearer token (embedded in their own web client)
-X_BEARER = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I7ssbmtoEw%3D1Ts0im8aBi5pZRSzsXS3ECzJNQVJPvs0Apna9GRf0r8rJG8Sb3"
+import time
 
 
-def get_guest_token() -> Optional[str]:
-    """Get a guest token from X's public API."""
+def fetch_user_followers_fxtwitter(handle: str) -> Optional[int]:
+    """
+    Fetch follower count using fxtwitter's public API.
+    No API key required.
+    """
     try:
-        req = urllib.request.Request(
-            "https://api.twitter.com/1.1/guest/activate.json",
-            data=b"",
-            method="POST",
-            headers={
-                "Authorization": f"Bearer {X_BEARER}",
-                "Content-Type": "application/x-www-form-urlencoded",
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-            }
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-            return data.get("guest_token")
-    except Exception as e:
-        logger.warning(f"Failed to get guest token: {e}")
-        return None
-
-
-def fetch_user_followers(handle: str, guest_token: str) -> Optional[int]:
-    """Fetch follower count for a single handle using X's public API."""
-    try:
-        url = f"https://api.twitter.com/1.1/users/show.json?screen_name={handle}"
+        url = f"https://api.fxtwitter.com/{handle}"
         req = urllib.request.Request(url, headers={
-            "Authorization": f"Bearer {X_BEARER}",
-            "x-guest-token": guest_token,
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+            "User-Agent": "Mozilla/5.0 (compatible; NosebleedSports/1.0)",
         })
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read())
-            return data.get("followers_count")
+            return data.get("user", {}).get("followers")
     except Exception as e:
         logger.debug(f"Failed to get followers for @{handle}: {e}")
         return None
 
 
 def scrape_all_followers() -> list:
-    """Fetch follower counts for all accounts using X's public API."""
+    """Fetch real follower counts for all accounts via fxtwitter."""
     results = []
-    guest_token = get_guest_token()
-
     for acc in ACCOUNTS:
-        count = None
-        if guest_token:
-            count = fetch_user_followers(acc["handle"], guest_token)
-
+        count = fetch_user_followers_fxtwitter(acc["handle"])
         if count is not None:
             results.append({**acc, "followers": count, "formatted": format_count(count)})
         else:
             results.append({**acc, "followers": None, "formatted": None})
-
+        time.sleep(0.3)  # be nice to the API
     return results
 
 
