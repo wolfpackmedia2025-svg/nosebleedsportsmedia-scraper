@@ -35,63 +35,45 @@ def format_count(n: int) -> str:
     return str(n)
 
 
-def scrape_followers(handle: str) -> Optional[dict]:
-    """Scrape follower count for a single X handle."""
+def fetch_followers_batch(handles: list[str]) -> dict:
+    """
+    Fetch follower counts using X's public follow-button CDN endpoint.
+    No API key required. Returns {handle: count} dict.
+    """
     try:
-        from scrapling.fetchers import StealthyFetcher
-
-        url = f"https://x.com/{handle}"
-        page = StealthyFetcher.fetch(
-            url,
-            headless=True,
-            network_idle=True,
-            timeout=30,
-        )
-
-        # Try to find follower count in page meta or structured data
-        # X embeds follower data in the page's JSON scripts
-        scripts = page.css('script[type="application/json"]')
-        for script in scripts:
-            try:
-                data = json.loads(script.text)
-                # Navigate the nested structure to find followers_count
-                text = str(data)
-                match = re.search(r'"followers_count":(\d+)', text)
-                if match:
-                    count = int(match.group(1))
-                    return {"handle": handle, "followers": count, "formatted": format_count(count)}
-            except Exception:
-                continue
-
-        # Fallback: look for follower text in page content
-        follower_patterns = [
-            r'([\d,]+)\s*Followers',
-            r'"followers_count":(\d+)',
-        ]
-        page_text = str(page.html_content if hasattr(page, 'html_content') else page)
-        for pattern in follower_patterns:
-            match = re.search(pattern, page_text)
-            if match:
-                count_str = match.group(1).replace(",", "")
-                count = int(count_str)
-                return {"handle": handle, "followers": count, "formatted": format_count(count)}
-
-        return None
-
+        import urllib.request
+        names = ",".join(handles)
+        url = f"https://cdn.syndication.twimg.com/widgets/followbutton/info.json?screen_names={names}"
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1)",
+            "Accept": "application/json",
+        })
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+            return {item["screen_name"].lower(): item.get("followers_count", 0) for item in data}
     except Exception as e:
-        logger.warning(f"Failed to scrape followers for @{handle}: {e}")
-        return None
+        logger.warning(f"Failed to fetch followers batch: {e}")
+        return {}
 
 
 def scrape_all_followers() -> list:
-    """Scrape follower counts for all accounts."""
+    """Fetch follower counts for all accounts in batches."""
     results = []
+    handles = [acc["handle"] for acc in ACCOUNTS]
+
+    # Fetch in batches of 10 (API limit)
+    counts = {}
+    for i in range(0, len(handles), 10):
+        batch = handles[i:i+10]
+        counts.update(fetch_followers_batch(batch))
+
     for acc in ACCOUNTS:
-        data = scrape_followers(acc["handle"])
-        if data:
-            results.append({**acc, **data})
+        count = counts.get(acc["handle"].lower())
+        if count is not None:
+            results.append({**acc, "followers": count, "formatted": format_count(count)})
         else:
             results.append({**acc, "followers": None, "formatted": None})
+
     return results
 
 
