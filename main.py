@@ -127,6 +127,27 @@ def get_trapwatch(force: bool = Query(False)):
     return {"traps": data, "source": source, "cached": False}
 
 
+@app.get("/whistlewatch")
+def get_whistlewatch(force: bool = Query(False)):
+    """Returns trending plays and leaderboard from WhistleWatch.ai. Cached 15 min."""
+    ww_cache = TTLCache(maxsize=1, ttl=900)
+    cache_key = "whistlewatch"
+    if not force and cache_key in ww_cache:
+        return {"data": ww_cache[cache_key], "cached": True}
+
+    from scrapers.whistlewatch import scrape_whistlewatch, get_mock_whistlewatch
+    data = scrape_whistlewatch()
+
+    if not data or not data.get("plays"):
+        data = get_mock_whistlewatch()
+        source = "mock_fallback"
+    else:
+        source = "scrapling"
+
+    ww_cache[cache_key] = data
+    return {"data": data, "source": source, "cached": False}
+
+
 @app.get("/odds")
 def get_odds(
     sports: Optional[str] = Query("nfl,nba,mlb", description="Comma-separated sports"),
