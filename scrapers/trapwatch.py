@@ -1,99 +1,113 @@
 """
-TrapWatch scraper using Scrapling.
-Fetches live trap board data from trapwatch.app
+TrapWatch scraper — reads live data directly from TrapWatch's Supabase backend.
+No headless browser needed. Real data, updated every ~20 minutes by TrapWatch.
 """
-import json
 import logging
-from typing import Optional
+import urllib.request
+import json
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
-TRAPWATCH_URL = "https://trapwatch.app/#/"
+SUPABASE_URL = "https://zpgmwnnrtjbbvmyqhkvu.supabase.co"
+SUPABASE_ANON_KEY = (
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+    ".eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpwZ213bm5ydGpiYnZteXFoa3Z1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk4MjEyMjIsImV4cCI6MjA4NTM5NzIyMn0"
+    ".EjPPMK2zmMqmbXH4mtFrr9eQZGS5Ic6zj6AJrl9kxsg"
+)
 
-TRAP_CATEGORIES = {
-    "trap_city": {"label": "Trap City", "emoji": "🏙️", "color": "red",
-                  "description": "Heavy public action on one side, sharp money on the other."},
-    "trap_detected": {"label": "Trap Detected", "emoji": "⚠️", "color": "yellow",
-                      "description": "Active trap behavior confirmed by line movement."},
-    "trap_potential": {"label": "Trap Potential", "emoji": "👀", "color": "blue",
-                       "description": "Early signs of a trap forming — watch these."},
+STATUS_MAP = {
+    "trap city":     "trap_city",
+    "trap detected": "trap_detected",
+    "trap potential":"trap_potential",
+}
+
+SPORT_MAP = {
+    "NHL": "NHL", "NBA": "NBA", "MLB": "MLB", "NFL": "NFL",
+    "NCAAB": "NCAAB", "NCAAF": "NCAAF", "CFB": "NCAAF",
+    "GOLF": "Golf", "SOC": "Soccer", "MLS": "Soccer",
 }
 
 
+def _fetch_today() -> list:
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    fields = "trap_status,matchup,sharp_selection,sharp_odds,league,time,odds,bets_pct,handle_pct,market,away_team_key,home_team_key"
+    url = (
+        f"{SUPABASE_URL}/rest/v1/trap_analysis"
+        f"?analysis_date=eq.{today}"
+        f"&game_state=eq.Scheduled"
+        f"&select={fields}"
+        f"&order=bets_pct.desc"
+    )
+    req = urllib.request.Request(url, headers={
+        "apikey": SUPABASE_ANON_KEY,
+        "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
+        "Accept": "application/json",
+    })
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read())
+
+
+def _format_row(row: dict) -> dict:
+    away = row.get("away_team_key", "")
+    home = row.get("home_team_key", "")
+    teams = f"{away} vs {home}" if away and home else row.get("matchup", "")
+
+    sharp = row.get("sharp_selection", "")
+    sharp_odds = row.get("sharp_odds")
+    odds_str = f"{sharp_odds:+d}" if isinstance(sharp_odds, (int, float)) else str(sharp_odds or "")
+
+    sport = SPORT_MAP.get(row.get("league", "").upper(), row.get("league", ""))
+
+    return {
+        "teams": teams,
+        "pick": sharp,
+        "line": odds_str,
+        "time": row.get("time", ""),
+        "sport": sport,
+        "market": row.get("market", ""),
+        "bets_pct": row.get("bets_pct"),
+        "handle_pct": row.get("handle_pct"),
+        "public_side": row.get("matchup", "").split(" @ ")[1] if " @ " in row.get("matchup", "") else "",
+    }
+
+
 def scrape_trapwatch() -> dict:
-    """
-    Scrape live trap board from trapwatch.app.
-    Returns categorized trap games.
-    """
+    """Fetch live trap data from TrapWatch's Supabase. Returns categorized trap games."""
     try:
-        from scrapling.fetchers import DynamicFetcher
+        rows = _fetch_today()
+        traps: dict = {k: [] for k in STATUS_MAP.values()}
+        traps["no_longer_trap"] = []
 
-        page = DynamicFetcher.fetch(
-            TRAPWATCH_URL,
-            headless=True,
-            network_idle=True,
-            timeout=30,
+        for row in rows:
+            status = row.get("trap_status", "").lower().strip()
+            bucket = STATUS_MAP.get(status)
+            if bucket:
+                traps[bucket].append(_format_row(row))
+
+        logger.info(
+            f"TrapWatch: {len(traps['trap_city'])} Trap City, "
+            f"{len(traps['trap_detected'])} Trap Detected, "
+            f"{len(traps['trap_potential'])} Trap Potential"
         )
-
-        traps = {
-            "trap_city": [],
-            "trap_detected": [],
-            "trap_potential": [],
-            "no_longer_trap": [],
-        }
-
-        # Find section headers and their associated game rows
-        # TrapWatch uses section labels to categorize games
-        full_text = page.get_all_text() if hasattr(page, "get_all_text") else str(page)
-
-        # Try to find game rows
-        game_rows = page.css("[class*='game'], [class*='trap'], [class*='matchup']", adaptive=True)
-
-        current_section = None
-        for row in game_rows:
-            row_text = row.text.strip() if hasattr(row, "text") else str(row)
-            if not row_text:
-                continue
-
-            # Detect section based on nearby heading
-            if "trap city" in row_text.lower():
-                current_section = "trap_city"
-                continue
-            elif "trap detected" in row_text.lower():
-                current_section = "trap_detected"
-                continue
-            elif "trap potential" in row_text.lower():
-                current_section = "trap_potential"
-                continue
-            elif "no longer" in row_text.lower():
-                current_section = "no_longer_trap"
-                continue
-
-            if current_section and current_section in traps:
-                traps[current_section].append({"text": row_text[:200]})
-
         return traps
 
     except Exception as e:
-        logger.warning(f"Failed to scrape TrapWatch: {e}")
+        logger.warning(f"TrapWatch Supabase fetch failed: {e}")
         return {}
 
 
 def get_mock_traps() -> dict:
-    """Fallback mock data that mirrors TrapWatch structure."""
+    """Fallback mock data — only used if Supabase is unreachable."""
     return {
         "trap_city": [
             {"teams": "Sabres vs Devils", "pick": "Sabres +1.5", "line": "-270", "time": "7:10 PM ET", "sport": "NHL"},
             {"teams": "Knights vs Oilers", "pick": "Golden Knights +1.5", "line": "-194", "time": "10:10 PM ET", "sport": "NHL"},
-            {"teams": "Ducks vs Canucks", "pick": "Ducks +1.5", "line": "-238", "time": "10:40 PM ET", "sport": "NHL"},
         ],
         "trap_detected": [
-            {"teams": "Celtics vs Pacers", "pick": "Total 133.5: Over", "line": "-114", "time": "7:00 PM ET", "sport": "NBA"},
+            {"teams": "Celtics vs Pacers", "pick": "Total Over 233.5", "line": "-114", "time": "7:00 PM ET", "sport": "NBA"},
         ],
         "trap_potential": [
-            {"teams": "Warriors vs Grizzlies", "pick": "Total 225.5: Over", "line": "-192", "time": "7:00 PM ET", "sport": "NBA"},
-            {"teams": "Oilers vs Kings", "pick": "Oilers", "line": "-130", "time": "10:40 PM ET", "sport": "NHL"},
-            {"teams": "Suns vs Jazz", "pick": "Total 135.5: Over", "line": "-119", "time": "9:00 PM ET", "sport": "NBA"},
+            {"teams": "Warriors vs Grizzlies", "pick": "Total Over 225.5", "line": "-192", "time": "7:00 PM ET", "sport": "NBA"},
         ],
-        "last_updated": "",
     }

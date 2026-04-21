@@ -195,3 +195,87 @@ def _mock_feed(handles: list) -> list:
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", 8000)), reload=True)
+
+
+# ── Article Generation ──────────────────────────────────────────────────────────
+ARTICLE_SYSTEM_PROMPT = "You are a sports journalist. Never use plan tags. Output clean JSON only. Never wrap your response in markdown code blocks or XML-style tags."
+
+ARTICLES_PROMPT_TEMPLATE = """You are a sports journalist for Nosebleed Sports Media. Write a detailed, informative sports article.
+
+{context}
+
+Instructions:
+- Write about the TOP 1-2 stories in depth — be specific about players, teams, scores, and stakes
+- Minimum 450 words with full paragraph breakdown
+
+Format — return ONLY valid JSON:
+{{
+  "title": "Punchy 8-12 word headline — specific, compelling",
+  "slug": "lowercase-hyphenated-slug",
+  "excerpt": "2-3 sentences summarizing the key story and why it matters",
+  "body": "Full article — 450-600 words with paragraphs. Be specific, use real names, scores, and context.",
+  "sport": "{sport}",
+  "publishedAt": "{publishedAt}"
+}}"""
+
+@app.route("/api/generate_article", methods=["POST"])
+def generate_article():
+    data = request.get_json() or {}
+    sport = data.get("sport", "NBA")
+    
+    # Fetch ESPN data
+    league_map = {"NBA": "basketball/nba", "NFL": "football/nfl", "NHL": "hockey/nhl", "MLB": "baseball/mlb", "MLS": "soccer/mls"}
+    league = league_map.get(sport, "basketball/nba")
+    url = f"https://site.api.espn.com/apis/site/v2/sports/{league}/news"
+    
+    try:
+        resp = requests.get(url, timeout=10)
+        espn_data = resp.json()
+        articles = espn_data.get("articles", [])
+        context = "\n\n".join([
+            f'STORY {i+1} [ESPN]: "{a.get("headline", "")}"{f"\\nDETAILS: {a.get("description", "")}" if a.get("description") else ""}'
+            for i, a in enumerate(articles[:5])
+        ]) if articles else "No ESPN data available."
+    except Exception as e:
+        return jsonify({"success": False, "error": f"ESPN fetch failed: {e}"}), 500
+    
+    # Generate article via MiniMax
+    import os
+    minimax_key = os.environ.get("OPENAI_API_KEY", os.environ.get("MINIMAX_API_KEY", ""))
+    if not minimax_key:
+        return jsonify({"success": False, "error": "No API key configured"}), 500
+    
+    prompt = ARTICLES_PROMPT_TEMPLATE.format(
+        context=context,
+        sport=sport,
+        publishedAt=datetime.utcnow().isoformat() + "Z"
+    )
+    
+    try:
+        import openai
+        client = openai.OpenAI(api_key=minimax_key, base_url="https://api.minimax.io/v1")
+        resp = client.chat.completions.create(
+            model="MiniMax-M2.7",
+            messages=[
+                {"role": "system", "content": ARTICLE_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=2500,
+            temperature=0.1
+        )
+        raw = resp.choices[0].message.content.strip()
+        
+        # Extract JSON
+        import re
+        json_str = re.sub(r'<[^>]+>', '', raw).replace("```json", "").replace("```", "").strip()
+        first_brace = json_str.find("{")
+        last_brace = json_str.rfind("}")
+        if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+            json_str = json_str[first_brace:last_brace+1]
+        
+        article = json.loads(json_str)
+        return jsonify({"success": True, "article": article, "espnContext": context[:200]})
+    except Exception as e:
+        return jsonify({"success": False, "error": f"Generation failed: {e}"}), 500
+
+
